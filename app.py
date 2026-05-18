@@ -8,6 +8,7 @@ from services.pdf_parser import parse_pdf
 from services.rule_checks import run_rule_checks
 from services.llm_reviewer import review_document
 from services.report_builder import build_markdown_report
+from services.word_report_builder import build_word_report
 
 
 st.set_page_config(
