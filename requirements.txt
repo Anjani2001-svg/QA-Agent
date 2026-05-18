@@ -1,9 +1,7 @@
 streamlit
-pymupdf
-pdfplumber
+PyMuPDF
 requests
 pydantic
 python-dotenv
-language-tool-python
 openai
-
+python-docx
