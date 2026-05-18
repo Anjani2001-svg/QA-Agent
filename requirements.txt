@@ -6,4 +6,4 @@ pydantic
 python-dotenv
 language-tool-python
 openai
-"@ | Set-Content requirements.txt -Encoding UTF8
+
