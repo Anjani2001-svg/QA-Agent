@@ -64,3 +64,9 @@ if uploaded_file is not None:
             file_name="qa_report.json",
             mime="application/json"
         )
+        st.download_button(
+    label="Download Word Report",
+    data=word_report,
+    file_name="qa_report.docx",
+    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+)
