@@ -1,6 +1,5 @@
 import json
 import tempfile
-from pathlib import Path
 
 import streamlit as st
 
@@ -18,6 +17,7 @@ st.set_page_config(
 )
 
 st.title("E-book / PDF Marketing QA Agent")
+
 st.write(
     "Upload an e-book or PDF and generate a QA report for public-facing "
     "marketing quality, readability, branding, accessibility and compliance risks."
@@ -47,6 +47,7 @@ if uploaded_file is not None:
             qa_json = review_document(document_profile, rule_issues)
 
         markdown_report = build_markdown_report(qa_json)
+        word_report = build_word_report(qa_json)
 
         st.subheader("QA Report")
         st.markdown(markdown_report)
@@ -64,9 +65,10 @@ if uploaded_file is not None:
             file_name="qa_report.json",
             mime="application/json"
         )
+
         st.download_button(
-    label="Download Word Report",
-    data=word_report,
-    file_name="qa_report.docx",
-    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-)
+            label="Download Word Report",
+            data=word_report,
+            file_name="qa_report.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
