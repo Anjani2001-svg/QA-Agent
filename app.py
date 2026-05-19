@@ -19,8 +19,7 @@ st.set_page_config(
 st.title("E-book / PDF Marketing QA Agent")
 
 st.write(
-    "Upload an e-book or PDF and generate a QA report for public-facing "
-    "marketing quality, readability, branding, accessibility and compliance risks."
+    "Upload an e-book and get a QA report."
 )
 
 uploaded_file = st.file_uploader(
