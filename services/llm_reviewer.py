@@ -58,7 +58,7 @@ def get_secret(name: str, default: str = "") -> str:
     return default
 
 
-def get_client_and_model():
+def get_client_and_models():
     provider = get_secret("LLM_PROVIDER", "openrouter").strip().lower()
 
     openrouter_key = get_secret("OPENROUTER_API_KEY", "").strip()
@@ -77,8 +77,10 @@ def get_client_and_model():
             api_key=api_key
         )
 
-        model = get_secret("OPENROUTER_MODEL", "deepseek/deepseek-v3.2")
-        return client, model
+        text_model = get_secret("OPENROUTER_MODEL", "deepseek/deepseek-v3.2")
+        vision_model = get_secret("OPENROUTER_VISION_MODEL", "openai/gpt-4o-mini")
+
+        return client, text_model, vision_model
 
     if provider == "openai":
         if not openai_key:
@@ -87,8 +89,10 @@ def get_client_and_model():
             )
 
         client = OpenAI(api_key=openai_key)
-        model = get_secret("OPENAI_MODEL", "gpt-4o-mini")
-        return client, model
+        text_model = get_secret("OPENAI_MODEL", "gpt-4o-mini")
+        vision_model = get_secret("OPENAI_VISION_MODEL", "gpt-4o-mini")
+
+        return client, text_model, vision_model
 
     raise RuntimeError("Invalid LLM_PROVIDER. Use 'openrouter' or 'openai'.")
 
@@ -106,73 +110,45 @@ def extract_json(text: str) -> dict:
         return json.loads(text[start:end + 1])
 
 
-def get_document_image_summary(document_profile: dict) -> dict:
-    pages = document_profile.get("pages", [])
-
-    pages_with_images = [
-        page.get("page_number")
-        for page in pages
-        if page.get("image_count", 0) > 0
-    ]
-
-    image_heavy_pages = [
-        page.get("page_number")
-        for page in pages
-        if page.get("image_count", 0) >= 2
-    ]
-
-    image_with_low_text_pages = [
-        page.get("page_number")
-        for page in pages
-        if page.get("image_count", 0) > 0 and page.get("word_count", 0) < 40
-    ]
-
-    return {
-        "total_pages_with_images": len(pages_with_images),
-        "pages_with_images": pages_with_images[:100],
-        "image_heavy_pages": image_heavy_pages[:100],
-        "image_with_low_text_pages": image_with_low_text_pages[:100],
-        "note": (
-            "Version 1 checks image relevance using image counts, page text, headings and context. "
-            "It does not fully inspect image pixels unless a vision model/page screenshot workflow is added."
+def call_json_model(client, model: str, messages: list[dict]) -> dict:
+    try:
+        completion = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.2,
+            response_format={"type": "json_object"}
         )
-    }
+    except Exception:
+        completion = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.2
+        )
+
+    content = completion.choices[0].message.content or ""
+    return extract_json(content)
 
 
 def compact_page(page: dict) -> dict:
-    image_count = page.get("image_count", 0)
-    word_count = page.get("word_count", 0)
-
-    if image_count > 0 and word_count < 40:
-        image_review_hint = (
-            "This page contains image(s) but very little text. "
-            "Check whether the image is clearly explained, relevant and accessible."
-        )
-    elif image_count > 0:
-        image_review_hint = (
-            "This page contains image(s). Review whether the image appears to support the surrounding text and heading."
-        )
-    else:
-        image_review_hint = "No image detected on this page."
-
     return {
         "page_number": page.get("page_number"),
-        "word_count": word_count,
-        "image_count": image_count,
-        "image_review_hint": image_review_hint,
+        "word_count": page.get("word_count", 0),
+        "image_count": page.get("image_count", 0),
         "links": page.get("links", []),
         "candidate_headings": page.get("candidate_headings", []),
         "text_excerpt": page.get("text", "")[:3500]
     }
 
 
-def build_review_prompt(document_profile: dict, rule_issues: list[dict]) -> str:
+def build_text_review_prompt(
+    document_profile: dict,
+    rule_issues: list[dict],
+    visual_issues: list[dict]
+) -> str:
     compact_pages = [
         compact_page(page)
         for page in document_profile.get("pages", [])
     ]
-
-    image_summary = get_document_image_summary(document_profile)
 
     return f"""
 You are a QA reviewer for public-facing marketing e-books and PDFs.
@@ -202,25 +178,20 @@ Important rules:
 - Do not make definitive plagiarism claims. Use "possible duplicate/copy concern" where appropriate.
 - Be specific and practical.
 - Focus on publishing quality, credibility, marketing effectiveness, accessibility and reader trust.
+- Do not duplicate issues already listed in rule-based or visual findings unless you add useful context.
 
-Image Relevance check:
-- If a page contains images, assess whether the image appears to support the surrounding content using the page heading, nearby text and context.
-- Do not flag a cover image as irrelevant simply because it has little surrounding text.
-- If visual inspection is needed, mark Image Relevance, Image Quality, Image Placement or Image Accuracy as "Needs manual review".
-- Do not pretend to inspect image pixels.
-- The Image Relevance category must appear in category_reviews with a clear status.
-
-Known rule-based issues:
+Rule-based issues:
 {json.dumps(rule_issues, indent=2, ensure_ascii=False)}
 
-Document image summary:
-{json.dumps(image_summary, indent=2, ensure_ascii=False)}
+Visual/image review issues:
+{json.dumps(visual_issues, indent=2, ensure_ascii=False)}
 
 Document profile:
 {json.dumps({
     "file_name": document_profile.get("file_name"),
-    "total_pages": document_profile.get("total_pages", document_profile.get("page_count")),
-    "pages_parsed": document_profile.get("pages_parsed", len(document_profile.get("pages", []))),
+    "total_pages": document_profile.get("total_pages"),
+    "pages_parsed": document_profile.get("pages_parsed"),
+    "visual_pages_reviewed": document_profile.get("visual_pages_reviewed", 0),
     "metadata": document_profile.get("metadata", {}),
     "pages": compact_pages
 }, indent=2, ensure_ascii=False)}
@@ -261,6 +232,120 @@ Return only valid JSON using this schema:
   "final_recommendation": ""
 }}
 """
+
+
+def build_visual_prompt(visual_page: dict) -> str:
+    return f"""
+You are visually reviewing one PDF page from an e-book or marketing document.
+
+Use UK English.
+
+Inspect the page screenshot and check:
+- Image Relevance: whether images visually support the surrounding topic/content.
+- Image Quality: whether images appear sharp, cropped correctly, not stretched, and professional.
+- Image Placement: whether images are placed near relevant text and do not disrupt reading flow.
+- Image Accuracy: whether images could mislead readers about people, settings, services, products, processes or cultural context.
+- Branding: whether visuals fit the document brand/style.
+- Spacing and Alignment: whether visual layout appears clean and professional.
+- Accessibility: whether image-heavy content may need alt text, captions or OCR text.
+
+Do not flag a cover image as irrelevant just because it has little text. Judge whether the visual appears relevant to the title/topic.
+
+Page information:
+{json.dumps({
+    "page_number": visual_page.get("page_number"),
+    "image_count": visual_page.get("image_count"),
+    "word_count": visual_page.get("word_count"),
+    "candidate_headings": visual_page.get("candidate_headings", []),
+    "text_excerpt": visual_page.get("text_excerpt", "")
+}, indent=2, ensure_ascii=False)}
+
+Return only valid JSON:
+{{
+  "issues": [
+    {{
+      "page_or_section": "Page {visual_page.get("page_number")}",
+      "category": "Image Relevance | Image Quality | Image Placement | Image Accuracy | Branding | Spacing and Alignment | Accessibility",
+      "severity": "Critical | Major | Minor | Suggestion",
+      "issue": "",
+      "explanation": "",
+      "recommended_fix": "",
+      "evidence": ""
+    }}
+  ]
+}}
+"""
+
+
+def review_visual_pages(client, vision_model: str, document_profile: dict) -> list[dict]:
+    visual_pages = document_profile.get("visual_pages", [])
+
+    if not visual_pages:
+        document_profile["visual_review_completed"] = False
+        document_profile["visual_pages_reviewed"] = 0
+        return []
+
+    visual_issues = []
+    reviewed_count = 0
+
+    for visual_page in visual_pages:
+        prompt = build_visual_prompt(visual_page)
+        image_data_url = visual_page.get("image_data_url")
+
+        if not image_data_url:
+            continue
+
+        messages = [
+            {
+                "role": "system",
+                "content": "You are a strict JSON API. Return only valid JSON. Do not use markdown."
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": prompt
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": image_data_url
+                        }
+                    }
+                ]
+            }
+        ]
+
+        try:
+            result = call_json_model(client, vision_model, messages)
+            issues = result.get("issues", [])
+
+            for issue in issues:
+                if issue.get("issue"):
+                    visual_issues.append(issue)
+
+            reviewed_count += 1
+
+        except Exception as exc:
+            visual_issues.append({
+                "page_or_section": f"Page {visual_page.get('page_number')}",
+                "category": "Image Relevance",
+                "severity": "Suggestion",
+                "issue": "Visual image review could not be completed",
+                "explanation": (
+                    "The app attempted to visually inspect this page, but the selected vision model did not complete the request."
+                ),
+                "recommended_fix": (
+                    "Check that OPENROUTER_VISION_MODEL is set to a vision-capable model, then rerun the review."
+                ),
+                "evidence": str(exc)[:250]
+            })
+
+    document_profile["visual_review_completed"] = reviewed_count > 0
+    document_profile["visual_pages_reviewed"] = reviewed_count
+
+    return visual_issues
 
 
 def normalise_severity(severity: str) -> str:
@@ -323,7 +408,9 @@ def calculate_score(issues: list[dict]) -> int:
         "Document appears to be learner/course content rather than marketing material": 4,
         "No clear call to action detected": 3,
         "Image-only or scanned page detected": 4,
-        "Broken link detected": 3
+        "Broken link detected": 3,
+        "Image appears unrelated to surrounding content": 4,
+        "Visual image review could not be completed": 1
     }
 
     for issue in issues:
@@ -384,9 +471,13 @@ def get_category_status(category: str, issues: list[dict], document_profile: dic
         for page in document_profile.get("pages", [])
     )
 
+    visual_done = document_profile.get("visual_review_completed", False)
+
     if not category_issues:
         if category in ["Image Relevance", "Image Quality", "Image Placement", "Image Accuracy"]:
-            return "Needs manual review" if has_images else "Not applicable"
+            if not has_images:
+                return "Not applicable"
+            return "Pass" if visual_done else "Needs manual review"
 
         if category in ["Tables and Charts"]:
             return "Not applicable"
@@ -404,38 +495,17 @@ def get_category_status(category: str, issues: list[dict], document_profile: dic
 
 def default_category_notes(category: str, status: str, document_profile: dict) -> str:
     if status == "Pass":
-        return "No significant issue detected in the parsed content."
+        return "No significant issue detected in the parsed and visual review."
 
     if status == "Not applicable":
         return "This category does not appear to apply to the parsed content."
 
     if status == "Needs manual review":
         return (
-            "This category may require manual or visual review because Version 1 uses extracted text, "
-            "page metadata and image counts rather than full visual inspection."
+            "This category may require manual review because not all visual or accessibility metadata can be fully inspected automatically."
         )
 
     return "Issues were detected in this category. See the issue log for details."
-
-
-def build_image_relevance_notes(status: str, document_profile: dict, image_issues: list[dict]) -> str:
-    image_summary = get_document_image_summary(document_profile)
-    total_pages_with_images = image_summary["total_pages_with_images"]
-
-    if total_pages_with_images == 0:
-        return "No images were detected in the parsed pages, so Image Relevance is not applicable."
-
-    if image_issues:
-        return (
-            f"Images were detected on {total_pages_with_images} parsed page(s). "
-            "Potential Image Relevance issues were found. Review the issue log and check the images manually before publishing."
-        )
-
-    return (
-        f"Images were detected on {total_pages_with_images} parsed page(s). "
-        "No clear Image Relevance issue was found from the surrounding text, but Version 1 cannot fully inspect image pixels. "
-        "Manual visual review is recommended."
-    )
 
 
 def build_category_reviews(report: dict, document_profile: dict) -> list[dict]:
@@ -473,22 +543,30 @@ def build_category_reviews(report: dict, document_profile: dict) -> list[dict]:
 
         review["category"] = category
         review["status"] = status
-        review["examples"] = review.get("examples") or examples
+        review["examples"] = examples
         review["notes"] = review.get("notes") or default_category_notes(category, status, document_profile)
 
         if category == "Image Relevance":
-            review["notes"] = build_image_relevance_notes(status, document_profile, category_issues)
+            if document_profile.get("visual_review_completed"):
+                review["notes"] = (
+                    f"Visual page review completed for {document_profile.get('visual_pages_reviewed', 0)} page(s). "
+                    "Image relevance was assessed using rendered page screenshots."
+                )
+            else:
+                review["notes"] = (
+                    "Image relevance could not be fully visually reviewed. Check the image manually or set a valid vision model."
+                )
 
         final_reviews.append(review)
 
     return final_reviews
 
 
-def ensure_report_complete(report: dict, document_profile: dict, rule_issues: list[dict]) -> dict:
+def ensure_report_complete(report: dict, document_profile: dict, all_input_issues: list[dict]) -> dict:
     report = report or {}
 
     model_issues = report.get("issues", [])
-    all_issues = dedupe_issues(rule_issues + model_issues)
+    all_issues = dedupe_issues(all_input_issues + model_issues)
 
     score = calculate_score(all_issues)
     status = status_from_score(score, all_issues)
@@ -500,7 +578,8 @@ def ensure_report_complete(report: dict, document_profile: dict, rule_issues: li
     if not report.get("executive_summary"):
         report["executive_summary"] = (
             f"The QA review analysed {document_profile.get('pages_parsed', len(document_profile.get('pages', [])))} "
-            f"page(s). {len(all_issues)} issue(s) were identified. "
+            f"page(s), including visual review for {document_profile.get('visual_pages_reviewed', 0)} page(s). "
+            f"{len(all_issues)} issue(s) were identified. "
             "Items marked as needing verification or manual review should be checked before publication."
         )
 
@@ -517,7 +596,7 @@ def ensure_report_complete(report: dict, document_profile: dict, rule_issues: li
 
         report["top_recommendations"] = fixes or [
             "Carry out a final manual proofread before publishing.",
-            "Manually review image relevance, image quality and layout before publishing.",
+            "Review image relevance, image quality and layout before publishing.",
             "Verify factual claims and legal/compliance-sensitive statements.",
             "Check links and calls to action.",
             "Review accessibility, including alt text, contrast and reading order."
@@ -536,8 +615,8 @@ def ensure_report_complete(report: dict, document_profile: dict, rule_issues: li
 
     if not report.get("accessibility_review"):
         report["accessibility_review"] = (
-            "Accessibility was reviewed using extractable text, image counts, headings and rule-based checks. "
-            "Alt text, tagged PDF structure, reading order and colour contrast may require manual review."
+            "Accessibility was reviewed using extractable text, image counts, rendered page screenshots and rule-based checks. "
+            "Alt text, tagged PDF structure, reading order and colour contrast may still require manual review."
         )
 
     if not report.get("final_recommendation"):
@@ -552,11 +631,23 @@ def ensure_report_complete(report: dict, document_profile: dict, rule_issues: li
 
 
 def review_document(document_profile: dict, rule_issues: list[dict], pages_per_batch: int = 5) -> dict:
-    client, model = get_client_and_model()
-    prompt = build_review_prompt(document_profile, rule_issues)
+    client, text_model, vision_model = get_client_and_models()
 
-    completion = client.chat.completions.create(
-        model=model,
+    visual_issues = review_visual_pages(
+        client=client,
+        vision_model=vision_model,
+        document_profile=document_profile
+    )
+
+    prompt = build_text_review_prompt(
+        document_profile=document_profile,
+        rule_issues=rule_issues,
+        visual_issues=visual_issues
+    )
+
+    text_report = call_json_model(
+        client=client,
+        model=text_model,
         messages=[
             {
                 "role": "system",
@@ -566,11 +657,11 @@ def review_document(document_profile: dict, rule_issues: list[dict], pages_per_b
                 "role": "user",
                 "content": prompt
             }
-        ],
-        temperature=0.2
+        ]
     )
 
-    content = completion.choices[0].message.content or ""
-    report = extract_json(content)
-
-    return ensure_report_complete(report, document_profile, rule_issues)
+    return ensure_report_complete(
+        report=text_report,
+        document_profile=document_profile,
+        all_input_issues=rule_issues + visual_issues
+    )
