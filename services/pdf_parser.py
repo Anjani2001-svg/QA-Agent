@@ -1,4 +1,5 @@
 from pathlib import Path
+import base64
 import re
 
 try:
@@ -43,7 +44,19 @@ def extract_candidate_headings(text: str) -> list[str]:
     return unique_headings[:30]
 
 
-def parse_pdf(pdf_path: str, max_pages: int | None = None) -> dict:
+def render_page_to_base64(page, zoom: float = 1.2) -> str:
+    matrix = fitz.Matrix(zoom, zoom)
+    pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+    png_bytes = pixmap.tobytes("png")
+    encoded = base64.b64encode(png_bytes).decode("utf-8")
+    return f"data:image/png;base64,{encoded}"
+
+
+def parse_pdf(
+    pdf_path: str,
+    max_pages: int | None = None,
+    max_visual_pages: int = 8
+) -> dict:
     path = Path(pdf_path)
 
     if not path.exists():
@@ -60,6 +73,7 @@ def parse_pdf(pdf_path: str, max_pages: int | None = None) -> dict:
     pages = []
     all_links = []
     all_headings = []
+    visual_pages = []
 
     for page_index in range(pages_to_parse):
         page = doc.load_page(page_index)
@@ -80,6 +94,7 @@ def parse_pdf(pdf_path: str, max_pages: int | None = None) -> dict:
                 all_links.append(link_record)
 
         images = page.get_images(full=True)
+        image_count = len(images)
         headings = extract_candidate_headings(text)
 
         for heading in headings:
@@ -88,15 +103,34 @@ def parse_pdf(pdf_path: str, max_pages: int | None = None) -> dict:
                 "heading": heading
             })
 
-        pages.append({
+        page_record = {
             "page_number": page_number,
             "text": text,
             "word_count": len(words),
             "character_count": len(text),
             "links": links,
-            "image_count": len(images),
+            "image_count": image_count,
             "candidate_headings": headings
-        })
+        }
+
+        pages.append(page_record)
+
+        should_render_visual = (
+            page_number == 1 or image_count > 0
+        ) and len(visual_pages) < max_visual_pages
+
+        if should_render_visual:
+            try:
+                visual_pages.append({
+                    "page_number": page_number,
+                    "image_count": image_count,
+                    "word_count": len(words),
+                    "candidate_headings": headings,
+                    "text_excerpt": text[:1200],
+                    "image_data_url": render_page_to_base64(page)
+                })
+            except Exception:
+                pass
 
     metadata = doc.metadata or {}
     doc.close()
@@ -113,6 +147,8 @@ def parse_pdf(pdf_path: str, max_pages: int | None = None) -> dict:
         "pages": pages,
         "links": all_links,
         "candidate_headings": all_headings,
+        "visual_pages": visual_pages,
+        "visual_pages_count": len(visual_pages),
         "analysis_limit_note": (
             "Only part of the PDF was parsed because a page limit was selected."
             if pages_to_parse < total_pages
