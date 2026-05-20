@@ -5,7 +5,7 @@ from docx.shared import Pt
 
 
 def add_heading(document, text, level=1):
-    document.add_heading(text, level=level)
+    document.add_heading(str(text or ""), level=level)
 
 
 def add_paragraph(document, text):
@@ -19,7 +19,6 @@ def build_word_report(report: dict) -> bytes:
 
     document.add_heading("E-book / PDF Marketing QA Report", level=0)
 
-    # Executive Summary
     add_heading(document, "1. Executive Summary", level=1)
     add_paragraph(document, f"Overall QA status: {report.get('overall_status', '')}")
     add_paragraph(document, f"Overall quality score: {report.get('quality_score', '')}/100")
@@ -29,7 +28,6 @@ def build_word_report(report: dict) -> bytes:
     for item in report.get("top_recommendations", [])[:5]:
         document.add_paragraph(str(item), style="List Bullet")
 
-    # Issue Log
     add_heading(document, "2. Issue Log", level=1)
 
     issues = report.get("issues", [])
@@ -61,7 +59,6 @@ def build_word_report(report: dict) -> bytes:
     else:
         add_paragraph(document, "No issues were identified.")
 
-    # Category Review
     add_heading(document, "3. Category-by-Category Review", level=1)
 
     for category in report.get("category_reviews", []):
@@ -75,7 +72,6 @@ def build_word_report(report: dict) -> bytes:
             for example in examples:
                 document.add_paragraph(str(example), style="List Bullet")
 
-    # Marketing Effectiveness
     add_heading(document, "4. Marketing Effectiveness Review", level=1)
 
     marketing = report.get("marketing_effectiveness", {})
@@ -86,11 +82,9 @@ def build_word_report(report: dict) -> bytes:
     add_paragraph(document, f"CTA quality: {marketing.get('cta_quality', '')}")
     add_paragraph(document, f"Lead-generation suitability: {marketing.get('lead_generation_suitability', '')}")
 
-    # Accessibility
     add_heading(document, "5. Accessibility Review", level=1)
     add_paragraph(document, report.get("accessibility_review", ""))
 
-    # Final Recommendation
     add_heading(document, "6. Final Recommendation", level=1)
     add_paragraph(document, report.get("final_recommendation", ""))
 
