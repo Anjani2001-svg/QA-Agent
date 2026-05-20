@@ -43,18 +43,6 @@ QA_CATEGORIES = [
 ]
 
 
-VISUAL_REVIEW_CATEGORIES = [
-    "Image Relevance",
-    "Image Quality",
-    "Image Placement",
-    "Image Accuracy",
-    "Formatting Consistency",
-    "Spacing and Alignment",
-    "Tables and Charts",
-    "Accessibility"
-]
-
-
 def get_secret(name: str, default: str = "") -> str:
     value = os.getenv(name, "")
 
@@ -71,39 +59,17 @@ def get_secret(name: str, default: str = "") -> str:
 
 
 def get_client_and_model():
-    """
-    Supports both OpenRouter and direct OpenAI.
-
-    For Streamlit Cloud Secrets, use:
-
-    LLM_PROVIDER = "openrouter"
-    OPENROUTER_API_KEY = "your_key_here"
-    OPENROUTER_MODEL = "openai/gpt-4o-mini"
-
-    Or:
-
-    LLM_PROVIDER = "openrouter"
-    OPENROUTER_API_KEY = "your_key_here"
-    OPENROUTER_MODEL = "deepseek/deepseek-chat"
-    """
-
-    provider = get_secret("LLM_PROVIDER", "").strip().lower()
+    provider = get_secret("LLM_PROVIDER", "openrouter").strip().lower()
 
     openrouter_key = get_secret("OPENROUTER_API_KEY", "").strip()
     openai_key = get_secret("OPENAI_API_KEY", "").strip()
-
-    if not provider:
-        if openrouter_key or openai_key.startswith("sk-or-"):
-            provider = "openrouter"
-        else:
-            provider = "openai"
 
     if provider == "openrouter":
         api_key = openrouter_key or openai_key
 
         if not api_key:
             raise RuntimeError(
-                "OpenRouter key missing. Add OPENROUTER_API_KEY in Streamlit Secrets or .env."
+                "OpenRouter key missing. Add OPENROUTER_API_KEY in Streamlit Secrets."
             )
 
         client = OpenAI(
@@ -111,13 +77,13 @@ def get_client_and_model():
             api_key=api_key
         )
 
-        model = get_secret("OPENROUTER_MODEL", "openai/gpt-4o-mini")
+        model = get_secret("OPENROUTER_MODEL", "deepseek/deepseek-v3.2")
         return client, model
 
     if provider == "openai":
         if not openai_key:
             raise RuntimeError(
-                "OpenAI key missing. Add OPENAI_API_KEY in Streamlit Secrets or .env."
+                "OpenAI key missing. Add OPENAI_API_KEY in Streamlit Secrets."
             )
 
         client = OpenAI(api_key=openai_key)
@@ -142,6 +108,7 @@ def extract_json(text: str) -> dict:
 
 def get_document_image_summary(document_profile: dict) -> dict:
     pages = document_profile.get("pages", [])
+
     pages_with_images = [
         page.get("page_number")
         for page in pages
@@ -167,7 +134,7 @@ def get_document_image_summary(document_profile: dict) -> dict:
         "image_with_low_text_pages": image_with_low_text_pages[:100],
         "note": (
             "Version 1 checks image relevance using image counts, page text, headings and context. "
-            "It does not fully inspect the image pixels unless a vision model/page screenshot workflow is added."
+            "It does not fully inspect image pixels unless a vision model/page screenshot workflow is added."
         )
     }
 
@@ -200,7 +167,11 @@ def compact_page(page: dict) -> dict:
 
 
 def build_review_prompt(document_profile: dict, rule_issues: list[dict]) -> str:
-    compact_pages = [compact_page(page) for page in document_profile.get("pages", [])]
+    compact_pages = [
+        compact_page(page)
+        for page in document_profile.get("pages", [])
+    ]
+
     image_summary = get_document_image_summary(document_profile)
 
     return f"""
@@ -234,14 +205,10 @@ Important rules:
 
 Image Relevance check:
 - If a page contains images, assess whether the image appears to support the surrounding content using the page heading, nearby text and context.
-- Flag images that appear random, misleading, purely decorative without purpose, off-topic, unexplained, or not clearly connected to the section.
-- If a page has images but very little text, flag this as a possible Image Relevance or Accessibility concern.
-- Do not pretend to inspect image pixels. If visual inspection is needed, mark the category as "Needs manual review".
+- Do not flag a cover image as irrelevant simply because it has little surrounding text.
+- If visual inspection is needed, mark Image Relevance, Image Quality, Image Placement or Image Accuracy as "Needs manual review".
+- Do not pretend to inspect image pixels.
 - The Image Relevance category must appear in category_reviews with a clear status.
-
-Image Quality, Image Placement and Image Accuracy:
-- If visual inspection is not available, mark these as "Needs manual review" when images are present.
-- Do not claim an image is low-resolution, stretched or misleading unless the supplied evidence supports it.
 
 Known rule-based issues:
 {json.dumps(rule_issues, indent=2, ensure_ascii=False)}
@@ -344,25 +311,52 @@ def dedupe_issues(issues: list[dict]) -> list[dict]:
 def calculate_score(issues: list[dict]) -> int:
     score = 100
 
-    penalties = {
+    base_penalties = {
         "Critical": 12,
         "Major": 6,
         "Minor": 2,
         "Suggestion": 0.5
     }
 
+    extra_issue_penalties = {
+        "Broken table of contents bookmark/reference": 4,
+        "Document appears to be learner/course content rather than marketing material": 4,
+        "No clear call to action detected": 3,
+        "Image-only or scanned page detected": 4,
+        "Broken link detected": 3
+    }
+
     for issue in issues:
-        score -= penalties.get(issue.get("severity", "Minor"), 2)
+        severity = issue.get("severity", "Minor")
+        issue_name = issue.get("issue", "")
+
+        score -= base_penalties.get(severity, 2)
+        score -= extra_issue_penalties.get(issue_name, 0)
 
     return max(0, min(100, round(score)))
 
 
 def status_from_score(score: int, issues: list[dict]) -> str:
-    critical_count = sum(1 for issue in issues if issue.get("severity") == "Critical")
-    major_count = sum(1 for issue in issues if issue.get("severity") == "Major")
+    critical_count = sum(
+        1 for issue in issues
+        if issue.get("severity") == "Critical"
+    )
+
+    major_count = sum(
+        1 for issue in issues
+        if issue.get("severity") == "Major"
+    )
+
+    issue_names = [
+        issue.get("issue", "")
+        for issue in issues
+    ]
 
     if critical_count >= 2:
         return "High-risk revision required"
+
+    if "Broken table of contents bookmark/reference" in issue_names and major_count >= 2:
+        return "Needs revision"
 
     if critical_count == 1 or major_count >= 5:
         return "Needs revision"
@@ -395,7 +389,7 @@ def get_category_status(category: str, issues: list[dict], document_profile: dic
             return "Needs manual review" if has_images else "Not applicable"
 
         if category in ["Tables and Charts"]:
-            return "Needs manual review"
+            return "Not applicable"
 
         if category in ["Accessibility", "Formatting Consistency", "Spacing and Alignment"]:
             return "Needs manual review"
@@ -406,53 +400,6 @@ def get_category_status(category: str, issues: list[dict], document_profile: dic
         return "Major issues"
 
     return "Minor issues"
-
-
-def build_category_reviews(report: dict, document_profile: dict) -> list[dict]:
-    issues = report.get("issues", [])
-    existing_reviews = report.get("category_reviews", [])
-
-    review_map = {}
-
-    for review in existing_reviews:
-        category = review.get("category", "")
-        if category:
-            review_map[category] = review
-
-    final_reviews = []
-
-    for category in QA_CATEGORIES:
-        category_issues = [
-            issue for issue in issues
-            if issue.get("category", "").lower() == category.lower()
-        ]
-
-        examples = [
-            f"{issue.get('page_or_section')}: {issue.get('issue')}"
-            for issue in category_issues
-        ][:5]
-
-        status = get_category_status(category, issues, document_profile)
-
-        if category in review_map:
-            review = review_map[category]
-            review["status"] = review.get("status") or status
-            review["notes"] = review.get("notes") or default_category_notes(category, status, document_profile)
-            review["examples"] = review.get("examples") or examples
-        else:
-            review = {
-                "category": category,
-                "status": status,
-                "notes": default_category_notes(category, status, document_profile),
-                "examples": examples
-            }
-
-        if category == "Image Relevance":
-            review["notes"] = build_image_relevance_notes(status, document_profile, category_issues)
-
-        final_reviews.append(review)
-
-    return final_reviews
 
 
 def default_category_notes(category: str, status: str, document_profile: dict) -> str:
@@ -491,6 +438,52 @@ def build_image_relevance_notes(status: str, document_profile: dict, image_issue
     )
 
 
+def build_category_reviews(report: dict, document_profile: dict) -> list[dict]:
+    issues = report.get("issues", [])
+    existing_reviews = report.get("category_reviews", [])
+
+    review_map = {}
+
+    for review in existing_reviews:
+        category = review.get("category", "")
+        if category:
+            review_map[category] = review
+
+    final_reviews = []
+
+    for category in QA_CATEGORIES:
+        category_issues = [
+            issue for issue in issues
+            if issue.get("category", "").lower() == category.lower()
+        ]
+
+        examples = [
+            f"{issue.get('page_or_section')}: {issue.get('issue')}"
+            for issue in category_issues
+        ][:5]
+
+        status = get_category_status(category, issues, document_profile)
+
+        review = review_map.get(category, {
+            "category": category,
+            "status": status,
+            "notes": default_category_notes(category, status, document_profile),
+            "examples": examples
+        })
+
+        review["category"] = category
+        review["status"] = status
+        review["examples"] = review.get("examples") or examples
+        review["notes"] = review.get("notes") or default_category_notes(category, status, document_profile)
+
+        if category == "Image Relevance":
+            review["notes"] = build_image_relevance_notes(status, document_profile, category_issues)
+
+        final_reviews.append(review)
+
+    return final_reviews
+
+
 def ensure_report_complete(report: dict, document_profile: dict, rule_issues: list[dict]) -> dict:
     report = report or {}
 
@@ -513,10 +506,12 @@ def ensure_report_complete(report: dict, document_profile: dict, rule_issues: li
 
     if not report.get("top_recommendations"):
         fixes = []
+
         for issue in all_issues:
             fix = issue.get("recommended_fix", "")
             if fix and fix not in fixes:
                 fixes.append(fix)
+
             if len(fixes) == 5:
                 break
 
